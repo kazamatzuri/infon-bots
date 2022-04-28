@@ -1,0 +1,546 @@
+--------------------------------------------------------------------------
+-- cjay's dritter versuch (captainjay at gmx.net)
+--
+-- Fuer jedes gespawnte Vieh wird eine eigene Creature Klasse instanziiert
+--------------------------------------------------------------------------
+
+--------- constants
+s_discover = 0
+s_harvest_eat = 1
+s_harvest_travel = 2
+s_harvest_travel_eat = 3
+s_heal = 4
+s_convert = 5
+s_spawn = 6
+s_hunt_pursuit = 7
+s_hunt_attack= 8
+s_defend = 9
+s_runaway = 10
+s_halt = 11
+
+d_box = 256
+
+b_safe = true
+b_limited = true
+b_unsafe = false
+b_unlimited = false
+
+-- globals
+lx, ly, hx, hy = world_size()
+koth_x, koth_y = get_koth_pos()
+
+width = (hx-lx)/d_box
+height = (hy-ly)/d_box
+
+function init()
+	print("----- global init -----")
+	map = {}
+	for x = 1,width do
+		map[x] = {}
+	end
+end
+
+
+----------- server callbacks
+
+function Creature:onSpawned()
+    -- Hier keine langlaufenden Aktionen ausfuehren!
+    print("Creature " .. self.id .. " spawned")
+end
+
+function Creature:onAttacked(attacker)
+    -- Hier keine langlaufenden Aktionen ausfuehren!
+    --print("Help! Creature " .. self.id .. " is attacked by Creature " .. attacker)
+	if not self.attackers then
+		self.attackers = {attacker}
+	else
+		table.insert(self.attackers, attacker)
+	end
+end
+
+function Creature:onRestart()
+    -- Methode wird nach Eingabe von 'r' ausgefuehrt
+    -- Hier keine langlaufenden Aktionen ausfuehren!
+	self:init()
+end
+
+function Creature:onKilled(killer)
+    -- Hier keine langlaufenden Aktionen ausfuehren!
+    if killer == self.id then
+        print("Creature " .. self.id .. " suicided")
+    elseif killer then 
+        print("Creature " .. self.id .. " killed by Creature " .. killer)
+    else
+        print("Creature " .. self.id .. " died")
+    end
+end
+
+function Creature:init()
+	if not map then
+		init()
+	end
+
+	self:debug("----- creature init -----")
+	self:discover()
+end
+
+
+
+
+function Creature:main()
+	----------------- state machine ----------------------------------------------
+	if not self.state then
+		self:init()
+	elseif self.state == s_discover then
+		if self:war_routine() then
+			-- state set external
+		elseif self:peace_routine() then
+			-- state set external
+		elseif self:is_on_food() then
+			self:harvest_eat()
+		elseif self:is_idle() then
+			self:course_rand_anywhere()
+			self:begin_walk_path()
+		end
+	elseif self.state == s_harvest_eat then
+		if self:war_routine() then
+			-- state set external
+		--if self:peace_routine() then
+			-- state set external
+		elseif self:is_idle() then
+			self:harvest_travel()
+		end
+	elseif self.state == s_harvest_travel then
+		if self:war_routine() then
+			-- state set external
+		elseif self:peace_routine() then
+			-- state set external
+		elseif self:is_idle() then
+			if self:is_on_food() then
+				self:harvest_eat()
+			else
+				self:score_empty()
+				self:harvest_travel()
+			end
+		elseif self:is_on_food() then
+			self:harvest_travel_eat()
+		end
+	elseif self.state == s_harvest_travel_eat then
+		if self:war_routine() then
+			-- state set external
+		elseif self:is_idle() then
+			self:resume_harvest_travel()
+		end
+	elseif self.state == s_heal then
+		if self:war_routine() then
+			-- state set external
+		elseif self:is_idle() then self:decide_next() end
+	elseif self.state == s_convert then
+		if self:is_idle() then self:decide_next() end
+	elseif self.state == s_spawn then
+		if self:is_idle() then self:decide_next() end
+	elseif self.state == s_defend then
+		if self:is_idle() then self:decide_next() end
+	elseif self.state == s_runaway then
+		if self:is_idle() then self:decide_next() end
+	elseif self.state == s_hunt_pursuit then
+		if self:health() < 19 or not creature_exists(self.target) or self:is_idle() then
+			self:decide_next()
+		elseif get_distance(self.id, self.target) < 450 then
+			self:hunt_attack(self.target)
+		else
+			self:pursuit(self.target)
+		end
+	elseif self.state == s_hunt_attack then
+		if self:is_idle() then
+			if creature_exists(self.target) then
+				self:hunt_pursuit(self.target)
+			else
+				self:decide_next()
+			end
+		end
+
+	elseif self.state == s_halt then
+		set_message(self.id, "halted")
+	else
+		self:debug("unknown self.state " .. self.state)
+	end
+
+	------------------ end state machine -----------------------------------------
+	
+
+	-------- round cleanup
+	
+	self.attackers = nil
+end
+
+
+
+
+--------- state transitions and helpers
+
+function Creature:halt(msg)
+	self.state = s_halt
+	self:debug("halted: " .. msg)
+end
+
+function Creature:harvest_eat()
+	set_message(self.id, "mjamm")
+	self.state = s_harvest_eat
+	self:score_eaten()
+	self:begin_eating()
+end
+
+function Creature:harvest_travel()
+	self.state = s_harvest_travel
+	local best = self:best_next_field()
+	if not best then
+		self:discover()
+		return
+	end
+	--self:debug("best next is " .. best.x  .. ", " .. best.y)
+	local x,y = field_to_pos(best)
+	self:set_path(x,y)
+	self:begin_walk_path()
+end
+
+function Creature:resume_harvest_travel()
+	self.state = s_harvest_travel
+	self:begin_walk_path()
+end
+
+function Creature:harvest_travel_eat()
+	set_message(self.id, "mmh")
+	self.state = s_harvest_travel_eat
+	self:score_empty()
+	self:begin_eating()
+end
+
+function Creature:discover()
+	set_message(self.id, "suchen")
+	self.state = s_discover
+	self:course_rand_anywhere()
+	self:begin_walk_path()
+end
+
+function Creature:runaway()
+	set_message(self.id, "weg hier")
+	self.state = s_runaway
+	self:course_rand_anywhere()
+	self:begin_walk_path()
+end
+
+function Creature:defend(attacker)
+	set_message(self.id, "selber")
+	self.state = s_defend
+	self:set_target(attacker)
+	self:begin_attacking()
+end
+
+function Creature:hunt_attack(target)
+	set_message(self.id, "patsch")
+	self.state = s_hunt_attack
+	self:set_target(target)
+	self:begin_attacking()
+end
+
+function Creature:hunt_pursuit(target)
+	set_message(self.id, "na warte")
+	self.state = s_hunt_pursuit
+	self.target = target
+	if not creature_exists(self.target) then
+		self:decide_next()
+	elseif get_distance(self.id, self.target) < 256 then
+		self:hunt_attack(target)
+	else
+		self:pursuit(self.target)
+	end
+end
+
+function Creature:pursuit(target)
+	if not creature_exists(target) then
+		return
+	elseif get_distance(self.id, self.target) > 1000 then
+		set_message(self.id, "zu weit")
+		return
+	else
+		self:set_path(get_pos(target))
+		self:begin_walk_path()
+	end
+end
+
+function Creature:convert(to_type)
+    if not self:set_conversion(to_type) then
+        return false
+    end
+	set_message(self.id, "wachsen")
+	self.state = s_convert
+    self:begin_converting()
+end
+
+function Creature:spawn()
+	set_message(self.id, "guck weg")
+	self.state = s_spawn
+	self:begin_spawning()
+end
+
+function Creature:heal()
+	set_message(self.id, "puh..")
+	self.state = s_heal
+	self:begin_healing()
+end
+
+function Creature:decide_next()
+	if self:is_on_food() then
+		self:harvest_eat()
+	else
+		self:harvest_travel()
+	end
+end
+
+
+
+
+---------- state interruptions
+
+function Creature:peace_routine()
+	if self:health() < 30 and self:food() > 0 then
+		self:heal()
+		return true
+	elseif self:food() > 8000 then
+		if self:type() == 0 then
+			self:convert(1)
+		else
+			self:spawn()
+		end
+		return true
+	elseif self:health() < 80 and self:food() > 0 then
+		self:heal()
+		return true
+	else
+		return false
+	end
+end
+
+function Creature:war_routine()
+	if self:is_attacked() then
+		for i, attacker in self.attackers do
+			if not attacker or not creature_exists(attacker) then
+				--blub
+				return false
+			elseif get_health(attacker) < get_health(self.id) then
+				self:defend(attacker)
+				return false
+			end
+		end
+
+		self:runaway()
+	else
+		return self:check_target()
+	end
+end
+	
+function Creature:check_target()
+	--self:debug("checking for possible targets..")
+	local nearest_id, nearest_x, nearest_y, nearest_pl_id, nearest_dist = self:nearest_enemy()
+	
+	if not nearest_id or ammount() < 4 then
+		return false
+	elseif not (get_type(self.id) == 1) then
+		return false
+	elseif (get_type(nearest_id) == 0) and (nearest_dist < 1000) and get_health(self.id) > 20 then
+		self:hunt_pursuit(nearest_id)
+		return true
+	elseif (get_type(nearest_id) == 1) and (nearest_dist < 1000) and (get_health(nearest_id) < 0.6 * get_health(self.id)) then
+		self:hunt_pursuit(nearest_id)
+		return true
+	else
+		return false
+	end
+end
+
+
+
+------------ event helpers
+
+function Creature:is_attacked()
+	return self.attackers ~= nil
+end
+
+function Creature:is_on_food()
+	return self:tile_food() > 0
+end
+
+
+
+
+------------- creature interaction
+
+function Creature:ask_for_help(sender, attacker)
+	-- TODO: implement
+	-- returns boolean
+end
+
+------------- misc
+
+
+function Creature:course_rand_anywhere()
+	local success = false
+	while success == false do
+		success = self:set_path(lx + math.random(hx - lx), ly + math.random(hy - ly))
+	end
+end
+
+
+
+
+------------- foodsearch strategy helpers (minesweeper strategy)
+
+function Creature:score_eaten()
+	local x, y = self:field_pos()
+	if not map[x][y] then map[x][y] = {} end
+	map[x][y].score = 0
+	map[x][y].eaten = game_time()
+
+	neighbors = get_ring(x, y, 1)
+	for i, n in neighbors do
+		if not map[n.x][n.y] then map[n.x][n.y] = {} end
+		--self:debug("neighbor " .. n.x .. " " .. n.y)
+		if not map[n.x][n.y].eaten or map[n.x][n.y].eaten < game_time() - 120000 then
+			local score = get_score(n.x, n.y)
+			map[n.x][n.y].score = score + 1
+		end
+	end
+end
+
+function Creature:score_empty()
+	local x, y = self:field_pos()
+	if not map[x][y] then map[x][y] = {} end
+	map[x][y].score = 0
+end
+
+function get_score(x, y)
+	if not map[x][y] then map[x][y] = {} end
+	local score = map[x][y].score
+	if not score then
+		map[x][y].score = 0
+		return 0
+	else
+		return score
+	end
+end
+
+function Creature:best_next_field()
+	local x, y = self:field_pos()
+	local success = false
+	local dist = 1
+	local candidates
+	local best_score = 0
+
+	while not success do
+		ring = get_ring(x, y, dist)
+		--self:debug("ring around " .. x .. ", " .. y .. " dist " .. dist .. " has " .. table.getn(ring) .. " elements")
+		if table.getn(ring) == 0 then
+			return nil
+		end
+
+		for i, f in ring do
+			score = get_score(f.x, f.y)
+			if score > 0 then
+				fx, fy = field_to_pos(f)
+				if not self:set_path(fx, fy) then
+					map[f.x][f.y].score = 0
+				else
+					success = true
+					if score > best_score then
+						best_score = score
+						candidates = {}
+					end
+					table.insert(candidates, f)
+				end
+			end
+		end
+
+		dist = dist + 1
+	end
+
+	--self:debug("num of candidates: " .. table.getn(candidates))
+	return candidates[math.random(table.getn(candidates))]
+end
+
+
+
+
+----------- map field helpers
+
+function Creature:field_pos()
+	local x, y = self:pos()
+	local field =  pos_to_field(x, y)
+	--self:debug("field pos: " .. field.x .. " " .. field.y)
+	return field.x, field.y
+end
+
+function field_to_pos(field)
+	return field.x*d_box-(d_box/2), field.y*d_box-(d_box/2)
+end
+
+function pos_to_field(x, y)
+	return {x=math.floor((x+d_box/2)/d_box), y=math.floor((y+d_box/2)/d_box)}
+end
+
+function get_ring(ox, oy, dist)
+	local fields = {}
+
+	dy = -dist
+	for dx=-dist,dist do
+		if 1 <= ox+dx and ox+dx <= width and 1 <= oy+dy and oy+dy <= height then
+			table.insert(fields, {x=ox+dx, y=oy+dy})
+		end
+	end
+
+	dy = dist
+	for dx=-dist,dist do
+		if 1 <= ox+dx and ox+dx <= width and 1 <= oy+dy and oy+dy <= height then
+			table.insert(fields, {x=ox+dx, y=oy+dy})
+		end
+	end
+
+	dx = -dist
+	for dy=1-dist,dist-1 do
+		if 1 <= ox+dx and ox+dx <= width and 1 <= oy+dy and oy+dy <= height then
+			table.insert(fields, {x=ox+dx, y=oy+dy})
+		end
+	end
+
+	dx = dist
+	for dy=1-dist,dist-1 do
+		if 1 <= ox+dx and ox+dx <= width and 1 <= oy+dy and oy+dy <= height then
+			table.insert(fields, {x=ox+dx, y=oy+dy})
+		end
+	end
+
+	return fields
+end
+
+
+
+
+-------------- misc
+
+function info()
+	print("width=" .. width .. ", height=" .. height)
+    for id, creature in creatures do
+        print("creature " .. id .. ": " .. (creature.message or "-"))
+		local x, y = creature:field_pos()
+		print("    field pos " .. x .. ", " .. y)
+		print("    state " .. creature.state .. "    basic state " .. get_state(id))
+    end
+end
+
+function Creature:debug(msg)
+	print(self.id .. ": " .. msg)
+end
+
+function ammount()
+	return table.getn(creatures)
+end
